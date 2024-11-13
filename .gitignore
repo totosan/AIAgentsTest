@@ -1,0 +1,6 @@
+.env
+.DS_Store
+.cache
+tmp/db/chroma.sqlite3
+.vscode
+llm_config.json

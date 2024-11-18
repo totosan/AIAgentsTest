@@ -1,5 +1,6 @@
-﻿using System.ClientModel;
-using System.ComponentModel;
+﻿
+using System.ClientModel;
+
 using AutoGen.Core;
 using AutoGen.DotnetInteractive;
 using AutoGen.OpenAI.Extension;
@@ -7,41 +8,32 @@ using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using AutoGen.SemanticKernel.Extension;
 using OpenAI;
-using System.DirectoryServices.Protocols;
+
 using AutoGen.SemanticKernel;
 using AutoGen.OpenAI;
 using Microsoft.DotNet.Interactive;
 
-const string ModelLlama = "bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q8_0.gguf";
-const string ModelCoder = "legraphista/Codestral-22B-v0.1-IMat-GGUF/Codestral-22B-v0.1-hf.IQ1_S.gguf";
+using MultiAgent.Plugins;
+using System.Management.Automation;
+
+
 const string ModelLlama2 = "llama3.2";
-const string ModelCoder2 = "phi3.5";
+const string ModelVision = "llava-phi3";
 const string EndpointOllama = "http://localhost:11434";
-const string EndpointLmStudio = "http://localhost:1234";
 
-var openaiClientLmStudio = CreateOpenAIClient(EndpointLmStudio);
+string FILE_PATH = string.Empty;
+
 var openaiClientOllama = CreateOpenAIClient(EndpointOllama);
-
 var chatClientOthers = openaiClientOllama.GetChatClient(ModelLlama2);
-//var chatClientOthers = openaiClientLmStudio.GetChatClient(ModelLlama);
-//var chatClientCoder = openaiClientOllama.GetChatClient(ModelCoder2);
-var chatClientCoder = openaiClientLmStudio.GetChatClient(ModelCoder);
+var chatClientVision = openaiClientOllama.GetChatClient(ModelVision);
 
 var kernelDotNet = InitializeDotnetKernel();
-var semanticKernel = InitializeSemanticKernel(openaiClientLmStudio);
+var semanticKernel = InitializeSemanticKernel(openaiClientOllama);
 
 var settings = new OpenAIPromptExecutionSettings
 {
   ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions,
 };
-
-var plugin = InitializePlugins(semanticKernel);
-
-KernelPlugin localTimePlugin = KernelPluginFactory.CreateFromType<LocalTimePlugin>();
-var kernelPluginMiddlewareTime = new KernelPluginMiddleware(semanticKernel, localTimePlugin);
-
-var userProxy = new DefaultReplyAgent(name: "user", defaultReply: GroupChatExtension.TERMINATE)
-    .RegisterPrintMessage();
 
 OpenAIClient CreateOpenAIClient(string endpoint)
 {
@@ -61,66 +53,118 @@ CompositeKernel InitializeDotnetKernel()
 Microsoft.SemanticKernel.Kernel InitializeSemanticKernel(OpenAIClient openaiClient)
 {
   return Microsoft.SemanticKernel.Kernel.CreateBuilder()
-      .AddOpenAIChatCompletion(ModelLlama2, openaiClient, "Llama")
+      .AddOpenAIChatCompletion(ModelLlama2, openaiClient, "not necessary")
       .Build();
 }
 
-KernelPlugin InitializePlugins(Microsoft.SemanticKernel.Kernel semanticKernel)
-{
-  var getWeatherFunction = KernelFunctionFactory.CreateFromMethod(
-      method: (string location) => $"The weather in {location} is 75 degrees Fahrenheit.",
-      functionName: "GetWeather",
-      description: "Get the weather for a location.");
 
-  return semanticKernel.CreatePluginFromFunctions("my_plugin", new[] { getWeatherFunction });
-}
+//Plugins
+var kernelPluginMiddlewarePdf = new KernelPluginMiddleware(semanticKernel, KernelPluginFactory.CreateFromType<PdfOperatorPlugin>());
+var kernelPluginMiddlewareFilesystem = new KernelPluginMiddleware(semanticKernel, KernelPluginFactory.CreateFromType<FilePlugin>());
+var userProxyAgent = await AgentFactory.CreateUserProxyAgent();
 
-var kernelPluginMiddlewareWeather = new KernelPluginMiddleware(semanticKernel, plugin);
+var visionAgent = new OpenAIChatAgent(chatClientVision, "VisionAgent",
+  "You are the vision agent. You can analyze images and extract text from them as if you are an OCR system.", 0, -1)
+  .RegisterMessageConnector()
+  .RegisterPrintMessage();
 
-var coder = await AgentFactory.CreateCoderAgentAsync(chatClientCoder);
-var reviewer = await AgentFactory.CreateCodeReviewerAgentAsync(chatClientCoder);
-var runner = await AgentFactory.CreateRunnerAgentAsync(kernelDotNet);
-var admin = await AgentFactory.CreateAdminAsync(chatClientOthers);
+// define the agents
+var pdfManagerAgent = AgentFactory.CreatePdfExtractAgent( chatClientOthers, kernelPluginMiddlewarePdf);
+var summarizerAgent = AgentFactory.CreateSummarizerAgent(chatClientOthers);
+var titleExtractorAgent = AgentFactory.CreateTitleAgent(chatClientOthers);
+var titleReviewerAgent = AgentFactory.CreateTitleReviewerAgent(chatClientOthers);
+var renameManagerAgent = AgentFactory.CreateRenamingAgent(chatClientOthers, kernelPluginMiddlewareFilesystem);
+var adminAgent = await AgentFactory.CreateAdminAsync(chatClientOthers);
 var groupAdmin = await AgentFactory.CreateGroupAdminAsync(chatClientOthers);
-var tool = new OpenAIChatAgent(chatClientOthers, "tool", temperature: 0, maxTokens: -1)
-    .RegisterMessageConnector()
-    .RegisterMiddleware(kernelPluginMiddlewareTime)
-    .RegisterPrintMessage();
 
-await tool.SendAsync(new TextMessage(Role.User, "What time is it?"));
+var myOrchestrator = new MyRolePlayOrchestrator(
+  groupAdmin,
+  AgentFactory.CreateTransitions(
+    adminAgent, 
+    userProxyAgent, 
+    pdfManagerAgent, 
+    summarizerAgent, 
+    titleExtractorAgent, 
+    titleReviewerAgent, 
+    renameManagerAgent)
+    );
 
-var myOrchestrator = new MyRolePlayOrchestrator(groupAdmin, AgentFactory.CreateTransitions(admin, coder, reviewer, runner, userProxy));
 var groupChat = new GroupChat(
-  members: new IAgent[] { admin, coder, runner, reviewer, userProxy },
-  orchestrator: new MyRolePlayOrchestrator(groupAdmin, AgentFactory.CreateTransitions(admin, coder, reviewer, runner, userProxy))
+  orchestrator: myOrchestrator,
+  members: [
+    adminAgent, 
+    pdfManagerAgent, 
+    summarizerAgent, 
+    titleExtractorAgent, 
+    titleReviewerAgent, 
+    userProxyAgent, 
+    renameManagerAgent
+    ]
   );
 
-admin.SendIntroduction("I will manage the group chat", groupChat);
-coder.SendIntroduction("I will write dotnet code to resolve task", groupChat);
-reviewer.SendIntroduction("I will review dotnet code", groupChat);
-runner.SendIntroduction("I will run dotnet code", groupChat);
+adminAgent.SendIntroduction("I will manage the group chat", groupChat);
+pdfManagerAgent.SendIntroduction("I will manage the file and folder operations", groupChat);
+summarizerAgent.SendIntroduction("I will summarize text from pdf file", groupChat);
+titleExtractorAgent.SendIntroduction("I will extract title from summary", groupChat);
+titleReviewerAgent.SendIntroduction("I will review title from title extractor", groupChat);
+userProxyAgent.SendIntroduction("I will be the user", groupChat);
 
-var task = "What's the 39th of fibonacci number?";
-var chatHistory = new List<IMessage>
+// Watch for file changes in the specified directory
+void WatchDirectory(string path)
 {
-  new TextMessage(Role.Assistant, task)
+  FileSystemWatcher watcher = new FileSystemWatcher
   {
-    From = userProxy.Name
-  }
-};
-Console.WriteLine("Please enter the task you want to solve:");
-task = Console.ReadLine();
-chatHistory[0] = new TextMessage(Role.Assistant, task)
+    Path = path,
+    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+    Filter = "*.pdf"
+  };
+
+  watcher.Changed += async (sender, e) => await OnChanged(sender, e);
+  watcher.EnableRaisingEvents = true;
+}
+
+// Event handler for file changes
+async Task OnChanged(object source, FileSystemEventArgs e)
 {
-  From = userProxy.Name
-};
-await foreach (var message in groupChat.SendAsync(chatHistory, maxRound: 10))
+  Console.WriteLine($"File changed: {e.FullPath}");
+  await StartAgentSystem(e.FullPath);
+}
+
+// Start the agent system with the filename
+async Task StartAgentSystem(string filename)
 {
-  if (message != null && message.From == admin.Name && message.GetContent().Contains("```summary"))
+  FILE_PATH = filename;
+  var task = $"Find a title for the document '{filename}' and rename accordingly";
+  var chatHistory = new List<IMessage>
   {
-    // Task complete!
-    break;
+    new TextMessage(Role.User, task)
+    {
+      From = adminAgent.Name
+    }
+  };
+
+  await foreach (var message in groupChat.SendAsync(chatHistory, maxRound: 20))
+  {
+    if (message != null && message.From == adminAgent.Name && message.GetContent().Contains("```summary"))
+    {
+      // Task complete!
+      break;
+    }
   }
 }
 
+//waiting for added files in the directory
+var dir = "/Users/toto/_reise";
+WatchDirectory(dir);
+
+//uncomment for direct start
+//await StartAgentSystem("/Users/toto/Projects/AIAgentsTest/code/CS/multiagent/Gescanntes Dokument.pdf");
+
+//loop until ctrl c is pressed
+Console.WriteLine($"Waiting for file changes in '{dir}'");
+Console.WriteLine("\t(Press Ctrl+C to exit.)");
+while (true)
+{
+  await Task.Delay(1000);
+}
 

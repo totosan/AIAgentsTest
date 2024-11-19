@@ -9,11 +9,11 @@ using System.Threading.Tasks;
 
 namespace AutoGen.Core;
 
-public class MyRolePlayOrchestrator : IOrchestrator
+public class SpecialRolePlayOrchestrator : IOrchestrator
 {
     private readonly IAgent admin;
     private readonly Graph? workflow = null;
-    public MyRolePlayOrchestrator(IAgent admin, Graph? workflow = null)
+    public SpecialRolePlayOrchestrator(IAgent admin, Graph? workflow = null)
     {
         this.admin = admin;
         this.workflow = workflow;

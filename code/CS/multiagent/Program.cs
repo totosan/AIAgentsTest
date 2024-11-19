@@ -1,20 +1,5 @@
 ﻿
-using System.ClientModel;
-
 using AutoGen.Core;
-using AutoGen.DotnetInteractive;
-using AutoGen.OpenAI.Extension;
-using Microsoft.SemanticKernel;
-using Microsoft.SemanticKernel.Connectors.OpenAI;
-using AutoGen.SemanticKernel.Extension;
-using OpenAI;
-
-using AutoGen.SemanticKernel;
-using AutoGen.OpenAI;
-using Microsoft.DotNet.Interactive;
-
-using MultiAgent.Plugins;
-using System.Management.Automation;
 
 
 const string ModelLlama2 = "llama3.2";
@@ -23,90 +8,61 @@ const string EndpointOllama = "http://localhost:11434";
 
 string FILE_PATH = string.Empty;
 
-var openaiClientOllama = CreateOpenAIClient(EndpointOllama);
-var chatClientOthers = openaiClientOllama.GetChatClient(ModelLlama2);
-var chatClientVision = openaiClientOllama.GetChatClient(ModelVision);
-
-var kernelDotNet = InitializeDotnetKernel();
-var semanticKernel = InitializeSemanticKernel(openaiClientOllama);
-
-var settings = new OpenAIPromptExecutionSettings
-{
-  ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions,
-};
-
-OpenAIClient CreateOpenAIClient(string endpoint)
-{
-  return new OpenAIClient(new ApiKeyCredential("api-key"), new OpenAIClientOptions
-  {
-    Endpoint = new Uri(endpoint),
-  });
-}
-
-CompositeKernel InitializeDotnetKernel()
-{
-  return DotnetInteractiveKernelBuilder
-      .CreateDefaultInProcessKernelBuilder()
-      .Build();
-}
-
-Microsoft.SemanticKernel.Kernel InitializeSemanticKernel(OpenAIClient openaiClient)
-{
-  return Microsoft.SemanticKernel.Kernel.CreateBuilder()
-      .AddOpenAIChatCompletion(ModelLlama2, openaiClient, "not necessary")
-      .Build();
-}
-
-
-//Plugins
-var kernelPluginMiddlewarePdf = new KernelPluginMiddleware(semanticKernel, KernelPluginFactory.CreateFromType<PdfOperatorPlugin>());
-var kernelPluginMiddlewareFilesystem = new KernelPluginMiddleware(semanticKernel, KernelPluginFactory.CreateFromType<FilePlugin>());
-var userProxyAgent = await AgentFactory.CreateUserProxyAgent();
-
-var visionAgent = new OpenAIChatAgent(chatClientVision, "VisionAgent",
-  "You are the vision agent. You can analyze images and extract text from them as if you are an OCR system.", 0, -1)
-  .RegisterMessageConnector()
-  .RegisterPrintMessage();
+await AgentFactory.InitFactory(EndpointOllama, ModelLlama2, ModelVision);
 
 // define the agents
-var pdfManagerAgent = AgentFactory.CreatePdfExtractAgent( chatClientOthers, kernelPluginMiddlewarePdf);
-var summarizerAgent = AgentFactory.CreateSummarizerAgent(chatClientOthers);
-var titleExtractorAgent = AgentFactory.CreateTitleAgent(chatClientOthers);
-var titleReviewerAgent = AgentFactory.CreateTitleReviewerAgent(chatClientOthers);
-var renameManagerAgent = AgentFactory.CreateRenamingAgent(chatClientOthers, kernelPluginMiddlewareFilesystem);
-var adminAgent = await AgentFactory.CreateAdminAsync(chatClientOthers);
-var groupAdmin = await AgentFactory.CreateGroupAdminAsync(chatClientOthers);
+var userProxyAgent = await AgentFactory.CreateUserProxyAgent();
+var pdfManagerAgent = AgentFactory.CreatePdfExtractAgent();
+var summarizerAgent = AgentFactory.CreateSummarizerAgent();
+var titleExtractorAgent = AgentFactory.CreateTitleAgent();
+var titleReviewerAgent = AgentFactory.CreateTitleReviewerAgent();
+var renameManagerAgent = AgentFactory.CreateRenamingAgent();
+var adminAgent = await AgentFactory.CreateAdminAsync();
+var groupAdmin = await AgentFactory.CreateGroupAdminAsync();
 
-var myOrchestrator = new MyRolePlayOrchestrator(
+/*
+  State diagram in Mermaid syntax :
+  admin --> pdfManagerAgent 
+  pdfManagerAgent --> summarizerAgent 
+  summarizerAgent --> titleExtractorAgent
+  titleExtractor --> titleReviewerAgent
+  titleReviewer --> admin
+  titleReviewer --> titleExtractor
+  titelReviewer --> fileManagerAgent
+  fileManagerAgent --> admin
+  admin --> userProxyAgent
+*/
+var myOrchestrator = new SpecialRolePlayOrchestrator(
   groupAdmin,
   AgentFactory.CreateTransitions(
-    adminAgent, 
-    userProxyAgent, 
-    pdfManagerAgent, 
-    summarizerAgent, 
-    titleExtractorAgent, 
-    titleReviewerAgent, 
+    adminAgent,
+    userProxyAgent,
+    pdfManagerAgent,
+    summarizerAgent,
+    titleExtractorAgent,
+    titleReviewerAgent,
     renameManagerAgent)
     );
 
 var groupChat = new GroupChat(
   orchestrator: myOrchestrator,
   members: [
-    adminAgent, 
-    pdfManagerAgent, 
-    summarizerAgent, 
-    titleExtractorAgent, 
-    titleReviewerAgent, 
-    userProxyAgent, 
+    adminAgent,
+    pdfManagerAgent,
+    summarizerAgent,
+    titleExtractorAgent,
+    titleReviewerAgent,
+    userProxyAgent,
     renameManagerAgent
     ]
   );
 
-adminAgent.SendIntroduction("I will manage the group chat", groupChat);
-pdfManagerAgent.SendIntroduction("I will manage the file and folder operations", groupChat);
-summarizerAgent.SendIntroduction("I will summarize text from pdf file", groupChat);
-titleExtractorAgent.SendIntroduction("I will extract title from summary", groupChat);
-titleReviewerAgent.SendIntroduction("I will review title from title extractor", groupChat);
+adminAgent.SendIntroduction("I will manage the group chat, by suggesting the next speaker", groupChat);
+pdfManagerAgent.SendIntroduction("I will manage the pdf extraction, which can either be a PDF with text or images", groupChat);
+summarizerAgent.SendIntroduction("I will summarize text from pdf file focussing on travel details", groupChat);
+titleExtractorAgent.SendIntroduction("I will generate a title from summary for the filename", groupChat);
+titleReviewerAgent.SendIntroduction("I will review title from title extractor and make suggestions", groupChat);
+renameManagerAgent.SendIntroduction("I will rename the file with the proposed title from titleExtractor", groupChat);
 userProxyAgent.SendIntroduction("I will be the user", groupChat);
 
 // Watch for file changes in the specified directory
@@ -115,7 +71,7 @@ void WatchDirectory(string path)
   FileSystemWatcher watcher = new FileSystemWatcher
   {
     Path = path,
-    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+    NotifyFilter = NotifyFilters.CreationTime | NotifyFilters.Size,
     Filter = "*.pdf"
   };
 

@@ -4,5 +4,5 @@
 tmp/db/chroma.sqlite3
 .vscode
 llm_config.json
-code/CS/*.pdf
-code/CS/*.jpeg
+code/CS/**/*.pdf
+code/CS/**/*.jpeg

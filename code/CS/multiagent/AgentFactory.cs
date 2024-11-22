@@ -117,8 +117,8 @@ public static class AgentFactory
                 pdfManagerAgent --> summarizerAgent 
                 summarizerAgent --> titleExtractorAgent
                 titleExtractor --> titleReviewerAgent
-                titleReviewer --> admin
-                titleReviewer --> titleExtractor
+                titleReviewerAgent --> admin
+                titleReviewerAgent --> titleExtractor
                 titelReviewer --> fileManagerAgent
                 fileManagerAgent --> titleReviewerAgent
                 --> admin

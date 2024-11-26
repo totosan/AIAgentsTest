@@ -1,16 +1,10 @@
 using System.ClientModel;
-using System.Speech.Recognition;
-using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization.Metadata;
-using AutoGen;
 using AutoGen.Core;
 using AutoGen.DotnetInteractive;
-using AutoGen.DotnetInteractive.Extension;
 using AutoGen.OpenAI;
 using AutoGen.OpenAI.Extension;
 using AutoGen.SemanticKernel;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.DotNet.Interactive;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
@@ -21,8 +15,10 @@ using static MultiAgent.Plugins.PdfExtractorizer;
 
 public static class AgentFactory
 {
+
     public static string EndpointOllama;
-    public static ChatClient ChatClientOthers;
+    public static ChatClient ChatClientToolsCallLlama32;
+    public static ChatClient ChatClientTextPhi35;
     static ChatClient ChatClientVision;
     public static KernelPluginMiddleware KernelPluginMiddlewarePdf;
     public static KernelPluginMiddleware KernelPluginMiddlewareFilesystem;
@@ -33,23 +29,35 @@ public static class AgentFactory
         ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions,
     };
 
-    public static async Task InitFactory(string endpointOllama, string ModelLlama2, string ModelVision)
+    /// <summary>
+    /// Initializes the factory with the specified endpoints and models.
+    /// </summary>
+    /// <param name="endpointOllama">The endpoint for the Ollama service.</param>
+    /// <param name="ModelLlama2">The model identifier for the Llama2 chat client.</param>
+    /// <param name="ModelVision">The model identifier for the Vision chat client.</param>
+    /// <returns>A task that represents the asynchronous initialization operation.</returns>
+    public static async Task InitFactory(string endpointOllama, string ModelLlama2, string ModelPhi35, string ModelVision)
     {
-        var openaiClientOllama = CreateOpenAIClient(endpointOllama);
-        ChatClientOthers = openaiClientOllama.GetChatClient(ModelLlama2);
-        ChatClientVision = openaiClientOllama.GetChatClient(ModelVision);
         EndpointOllama = endpointOllama;
 
-        var dotNetKernel = InitializeDotnetKernel();
-        var semanticKernel = InitializeSemanticKernel(openaiClientOllama, ModelLlama2);
+        var openaiClientOllama = CreateOpenAIClient(endpointOllama);
+
+        ChatClientTextPhi35 = openaiClientOllama.GetChatClient(ModelPhi35);
+        ChatClientToolsCallLlama32 = openaiClientOllama.GetChatClient(ModelLlama2);
+        ChatClientVision = openaiClientOllama.GetChatClient(ModelVision);
+
+        // Kernels for different agents capabilities
+        var dotNetKernel = InitializeDotnetKernel(); // running created C# code
+        var semanticKernel = InitializeSemanticKernel(openaiClientOllama, ModelLlama2); //calling OpenAI API compatible tools
 
         //Plugins
         KernelPluginMiddlewarePdf = new KernelPluginMiddleware(semanticKernel, KernelPluginFactory.CreateFromType<PdfOperatorPlugin>());
         KernelPluginMiddlewareFilesystem = new KernelPluginMiddleware(semanticKernel, KernelPluginFactory.CreateFromType<FilePlugin>());
     }
+
     static OpenAIClient CreateOpenAIClient(string endpoint)
     {
-        return new OpenAIClient(new ApiKeyCredential("api-key"), new OpenAIClientOptions
+        return new OpenAIClient(new ApiKeyCredential("not-needed"), new OpenAIClientOptions
         {
             Endpoint = new Uri(endpoint),
         });
@@ -70,29 +78,39 @@ public static class AgentFactory
     }
     #endregion
 
+
     #region CreateAgents
 
+    /// <summary>
+    /// Creates a Vision agent with predefined settings.
+    /// </summary>
     public static async Task<IAgent> CreateVisionAgent()
     {
-        return new OpenAIChatAgent(ChatClientVision, "VisionAgent",
-      "You are the vision agent. You can analyze images and extract text from them as if you are an OCR system.", 0, -1)
+        return new OpenAIChatAgent(ChatClientVision, "VisionAgent", SystemMessages.SystemMessageVision, 0, -1)
       .RegisterMessageConnector()
       .RegisterPrintMessage();
     }
 
+    /// <summary>
+    /// Creates a UserProxy agent with predefined settings.
+    /// </summary>
     public static async Task<IAgent> CreateUserProxyAgent()
     {
         var userProxy = new DefaultReplyAgent(name: "user", defaultReply: GroupChatExtension.TERMINATE)
             .RegisterPrintMessage();
         return userProxy;
     }
-    // Creates a GroupAdmin agent with predefined settings
+
+    /// <summary>
+    /// Creates a GroupAdmin agent with predefined settings.
+    /// </summary>
+    /// <returns></returns>
     public static async Task<IAgent> CreateGroupAdminAsync()
     {
         var admin = new OpenAIChatAgent(
-            chatClient: ChatClientOthers,
+            chatClient: ChatClientToolsCallLlama32,
             name: "GroupAdmin",
-            systemMessage: "You are the admin of the group chat",
+            systemMessage: SystemMessages.SystemMessageGroupAdmin,
             temperature: 0,
             maxTokens: -1)
             .RegisterMessageConnector()
@@ -101,53 +119,17 @@ public static class AgentFactory
         return admin;
     }
 
-    // Creates an Admin agent with predefined settings
+    /// <summary>
+    /// Creates an Admin agent with predefined settings
+    /// </summary>
     public static async Task<IAgent> CreateAdminAsync()
     {
 
         var admin = new OpenAIChatAgent(
-            chatClient: ChatClientOthers,
+            chatClient: ChatClientToolsCallLlama32,
             name: "admin",
             temperature: 0,
-            systemMessage: """
-            You are a manager who takes file operations from user and resolve problem by splitting them into small tasks and assign each task to the most appropriate agent.
-            
-            The workflow is as follows:
-            -   admin --> pdfManagerAgent 
-                pdfManagerAgent --> summarizerAgent 
-                summarizerAgent --> titleExtractorAgent
-                titleExtractor --> titleReviewerAgent
-                titleReviewerAgent --> admin
-                titleReviewerAgent --> titleExtractor
-                titelReviewer --> fileManagerAgent
-                fileManagerAgent --> titleReviewerAgent
-                --> admin
-                admin --> userProxyAgent
-
-            - You take the request from the user.
-            - You can break down the problem into smaller tasks and assign them to the most appropriate agent. 
-            - if a title was found, the reviewer will review the title and give feedback. According to the feedback, you can decide to change the title or keep it.
-            - Do until the reviewer is satisfied with the title or the rounds are over.
-
-            You can use the following json format to assign task to agents:
-            ```task
-            {
-                "to": "{agent_name}",
-                "task": "{a short description of the task}",
-                "context": "{previous context from scratchpad}"
-            }
-            ```
-            Once the task is completed, the agent will send a message with the following format:
-            ```task
-            {
-                "task": "{task_description}",
-                "status": "{COMPLETED/FAILED}",
-                "result": "{result}"
-            }
-            ```
-
-            Your reply must contain one of [```task] to indicate the type of your message.
-            """,
+            systemMessage: SystemMessages.SystemMessageAdmin,
             maxTokens: -1)
             .RegisterMessageConnector()
             .RegisterPrintMessage();
@@ -155,11 +137,14 @@ public static class AgentFactory
         return admin;
     }
 
+    /// <summary>
+    /// Creates a PdfExtract agent with predefined settings.
+    /// </summary>
     public static MiddlewareAgent<MiddlewareStreamingAgent<OpenAIChatAgent>> CreatePdfExtractAgent()
     {
 
-        return new OpenAIChatAgent(ChatClientOthers, "PdfManager",
-        "You are the pdf manager. You have tools to work with real pdf, which includes opening PDF to get its content.", 0, -1)
+        return new OpenAIChatAgent(ChatClientToolsCallLlama32, "PdfManager",
+        SystemMessages.SystemMessagePdfExtractor, 0, -1)
           .RegisterMessageConnector()
           .RegisterMiddleware(KernelPluginMiddlewarePdf)
           .RegisterMiddleware(async (msgs, option, agent, ct) =>
@@ -182,110 +167,46 @@ public static class AgentFactory
           })
           .RegisterPrintMessage();
     }
-
+    /// <summary>
+    /// Creates a Summarizer agent with predefined settings.
+    /// </summary>
     public static MiddlewareStreamingAgent<OpenAIChatAgent> CreateSummarizerAgent()
     {
-        return new OpenAIChatAgent(ChatClientOthers, "Summarizer", """
-    You are the text summarizer. That's what you just do. For a given text, you create a short summary from.
-    To work optimized for the overall goal (generate a title), you should create a summary that is short but still contains the most important information.
-    Most title reflect a document of an expenses docuement (hotel invoice, gasoline bill, parking ticket, etc.)
-
-    Your key information to focus on are:
-    - Hotel name
-    - Location
-    - booking details
-    - Travel dates
-    - vehicle details
-    - gasoline details
-    - flight details
-    - parking (name, duration, ...)
-    - ...
-
-    DON'T CARE ABOUT prices, amounts, etc. Just the key information that is important for the title.
-    everything, that could be taken as a title.
-    """,
+        return new OpenAIChatAgent(ChatClientToolsCallLlama32, "Summarizer", SystemMessages.SystemMessageSummarizer,
             temperature: 0)
           .RegisterMessageConnector()
           .RegisterPrintMessage();
     }
 
+    /// <summary>
+    /// Creates a Title agent with predefined settings.
+    /// </summary>
     public static MiddlewareStreamingAgent<OpenAIChatAgent> CreateTitleAgent()
     {
-        return new OpenAIChatAgent(ChatClientOthers, "TitleExtractor",
-          @"You are the title extractor. Your task is to take the most matching elements of a summary for your task and make a short but marking title for a file.
-  Rules:
-  - You have to respect the length, speaking sense and filesystem constrains on macOs.
-  - Country should be with country code (e.g. DE, US, CH, NL, ...)
-  - Date should be in the format YYYY_MM_DD
-  - start always with the type of document (hotel, bill, invoice, parking, ....)
-  - DON'T use special chars as first char (e.g. #, @, ...)
-
-  you generate a title in a format like the examples below:
-  
-  # FORMAT AND EXAMPLE 1 for Hotel
-    <HOTELNAME>_<LOCATION>_<DATE>
-    e.g. Hilton_London_2022-12-31
-
-  # FORMAT AND EXAMPLE 2 for Gasoline
-    TANKEN_<LOCATION>_<GASOLINENAME>_<GASTYPE>_<YEAR_MONTH>
-    e.g. TANKEN_GERMANY_RASTHOF_DIESEL_23_05
-  
-  # FORMAT AND EXAMPLE 3 for Parking
-    PARKING_<PARKINGLOT-IDENTIFIER>_<LOCATION>_<DATE>
-    e.g. PARKING_URANIA_ZURICH_2022-12-31
-    
-    ",
+        return new OpenAIChatAgent(ChatClientToolsCallLlama32, "TitleExtractor",
+          SystemMessages.SystemMessageTitleCreator,
             temperature: 0)
           .RegisterMessageConnector()
           .RegisterPrintMessage();
     }
-
+    /// <summary>
+    /// Creates a TitleReviewer agent with predefined settings.
+    /// </summary>
     public static MiddlewareStreamingAgent<OpenAIChatAgent> CreateTitleReviewerAgent()
     {
-        return new OpenAIChatAgent(ChatClientOthers, "TitleReviewer",
-          @"You are the title reviewer. You can make comments to a title respecting length, speaking sense and filesystem constrains on macOs.
-  Rules:
-  - You have to respect the length, speaking sense and filesystem constrains on macOs.
-  - Country should be with country code (e.g. DE, US, CH, NL, ...)
-  - Date should be in the format YYYY_MM_DD
-  - start always with the type of document (hotel, bill, invoice, parking, ....)
-  - DON'T use special chars as first char (e.g. #, @, ...)
- General:
-  - Your task is to check, that the title is correct and alignes with the documents content.
-  - You can also suggest improvements to the title.
-  - You can also reject the title and ask for a new one. In that case ask for a new summary, for a complete new title.
-  
-  Some simplifications:
-  - a flight need not to have the airline name in the title, 'FLIGHT' as identifier is enough.
-   
-  Put your comment between ```review and ```, if the title satisfies all conditions, put APPROVED in review.result field.
-  Otherwise, put REJECTED along with comments. make sure your comment is clear and easy to understand.
-    
-    See these examples:
-
-  #EXAMPLE 1
-  If you are satisfied with the title, you can approve it by sending a message with the following format:
-  ```review
-  comment: the comment, you want to send
-  status: APPROVED
-  
-  # EXAMPLE 2
-  if you are not satisfied with the title, you can reject it by sending a message with the following format:
-  ```review
-  comment: the comment, you want to send
-  status: REJECTED
-  ```
-  ",
+        return new OpenAIChatAgent(ChatClientToolsCallLlama32, "TitleReviewer",
+          SystemMessages.SystemMessageTitleReviewer,
             temperature: 0)
           .RegisterMessageConnector()
           .RegisterPrintMessage();
     }
-
+    /// <summary>
+    /// Creates a Renaming agent with predefined settings.
+    /// </summary>
     public static MiddlewareAgent<MiddlewareStreamingAgent<OpenAIChatAgent>> CreateRenamingAgent()
     {
-        return new OpenAIChatAgent(ChatClientOthers, "FilesystemManager",
-          @"You are a filesystem manager. You can manage files and folders on the filesystem. You can list files in a folder, create a folder, delete a file, etc.
-  Your main task is to rename files. Therefore, you have to find the original filename in the chat history and rename the file accordingly with the new filename.",
+        return new OpenAIChatAgent(ChatClientToolsCallLlama32, "FilesystemManager",
+          SystemMessages.SystemMessageFilesystemManager,
           temperature: 0)
           .RegisterMessageConnector()
           .RegisterMiddleware(KernelPluginMiddlewareFilesystem)
@@ -293,19 +214,21 @@ public static class AgentFactory
     }
 
     #endregion
+
+
     #region CreateTransitions
 
     /// <summary>
-    /// Creates a workflow graph with transitions between various agents.
+    /// Creates the transitions for the agents.
     /// </summary>
-    /// <param name="admin">The admin agent.</param>
-    /// <param name="userProxyAgent">The user proxy agent.</param>
-    /// <param name="pdfManagerAgent">The PDF manager agent.</param>
-    /// <param name="summarizerAgent">The summarizer agent.</param>
-    /// <param name="titleExtractorAgent">The title extractor agent.</param>
-    /// <param name="titleReviewerAgent">The title reviewer agent.</param>
-    /// <param name="fileManagerAgent">The file manager agent.</param>
-    /// <returns>A Graph object representing the workflow with all defined transitions.</returns>
+    /// <param name="admin"></param>
+    /// <param name="userProxyAgent"></param>
+    /// <param name="pdfManagerAgent"></param>
+    /// <param name="summarizerAgent"></param>
+    /// <param name="titleExtractorAgent"></param>
+    /// <param name="titleReviewerAgent"></param>
+    /// <param name="fileManagerAgent"></param>
+    /// <returns>Returns the transition graph</returns>
     public static Graph CreateTransitions(IAgent admin, IAgent userProxyAgent, IAgent pdfManagerAgent, IAgent summarizerAgent, IAgent titleExtractorAgent, IAgent titleReviewerAgent, IAgent fileManagerAgent)
     {
 

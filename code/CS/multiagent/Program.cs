@@ -1,14 +1,14 @@
 ﻿
 using AutoGen.Core;
 
-
 const string ModelLlama2 = "llama3.2";
+const string ModelPhi35 = "phi3.5";
 const string ModelVision = "llava-phi3";
 const string EndpointOllama = "http://localhost:11434";
 
 string FILE_PATH = string.Empty;
 
-await AgentFactory.InitFactory(EndpointOllama, ModelLlama2, ModelVision);
+await AgentFactory.InitFactory(EndpointOllama, ModelLlama2, ModelPhi35, ModelVision);
 
 // define the agents
 var userProxyAgent = await AgentFactory.CreateUserProxyAgent();
